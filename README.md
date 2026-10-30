@@ -62,6 +62,22 @@ try to treat specially.
 [99-dxgdrm.rules](99-dxgdrm.rules) opens up permissions on both nodes as soon
 as the module loads.
 
+## Releases
+
+Each `v*` tag gets a GitHub release with one `dxgdrm-<kernel release>.tar.gz`
+per supported WSL kernel, built by CI. It contains
+`lib/modules/<kernel release>/extra/` with `dxgdrm.ko`, the DRM core modules
+that kernel lacks and a `modules.dep`, plus the udev rules under
+`lib/udev/rules.d/`. Unpack it into a directory and load the module from
+there; `modprobe` loads the DRM core modules first:
+
+```sh
+sudo mkdir -p /opt/dxgdrm
+curl -fL https://github.com/weaselway/dxgdrm/releases/download/v1.2.0/dxgdrm-$(uname -r).tar.gz |
+    sudo tar -C /opt/dxgdrm -xz
+sudo modprobe -d /opt/dxgdrm dxgdrm
+```
+
 ## Building and loading
 
 WSL ships no `/lib/modules/$(uname -r)/build`, so building this module means
