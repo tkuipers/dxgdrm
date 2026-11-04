@@ -218,12 +218,28 @@ struct drm_dxgdrm_select_display {
 	__u32 pad;
 };
 
+/**
+ * struct drm_dxgdrm_set_connected - plug the display in or pull it out
+ *
+ * A connector starts out connected. A presenter that shows the display in a
+ * client's window can follow that window, so the compositor moves its
+ * workspaces to the displays that are still there when the window closes. A
+ * change is a hotplug event.
+ */
+struct drm_dxgdrm_set_connected {
+	/** @connected: in, 0 or not 0. */
+	__u32 connected;
+	/** @pad: must be 0. */
+	__u32 pad;
+};
+
 #define DRM_DXGDRM_FENCE_FROM_EVENTFD	0x00
 #define DRM_DXGDRM_GET_FRAME		0x01
 #define DRM_DXGDRM_READ_PIXELS		0x02
 #define DRM_DXGDRM_ACK_FRAME		0x03
 #define DRM_DXGDRM_SET_MODE		0x04
 #define DRM_DXGDRM_SELECT_DISPLAY	0x05
+#define DRM_DXGDRM_SET_CONNECTED	0x06
 
 #define DRM_IOCTL_DXGDRM_FENCE_FROM_EVENTFD				\
 	DRM_IOWR(DRM_COMMAND_BASE + DRM_DXGDRM_FENCE_FROM_EVENTFD,	\
@@ -243,6 +259,9 @@ struct drm_dxgdrm_select_display {
 #define DRM_IOCTL_DXGDRM_SELECT_DISPLAY					\
 	DRM_IOW(DRM_COMMAND_BASE + DRM_DXGDRM_SELECT_DISPLAY,		\
 		struct drm_dxgdrm_select_display)
+#define DRM_IOCTL_DXGDRM_SET_CONNECTED					\
+	DRM_IOW(DRM_COMMAND_BASE + DRM_DXGDRM_SET_CONNECTED,		\
+		struct drm_dxgdrm_set_connected)
 
 #if defined(__cplusplus)
 }

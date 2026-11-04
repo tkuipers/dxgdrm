@@ -125,6 +125,9 @@ struct dxgdrm_display {
 	/* The size and refresh rate of the one mode the connector offers, see
 	 * dxgdrm_set_mode_ioctl(). Under frame_lock. */
 	unsigned int mode_width, mode_height, mode_refresh_mhz;
+	/* The connector's state, see dxgdrm_set_connected_ioctl(). Under
+	 * frame_lock. */
+	bool disconnected;
 
 	/*
 	 * Flip throttling, see dxgdrm_crtc_atomic_flush(). @flip_seq is the
@@ -927,7 +930,22 @@ static const struct drm_connector_helper_funcs dxgdrm_connector_helper_funcs = {
 	.get_modes	= dxgdrm_connector_get_modes,
 };
 
+static enum drm_connector_status
+dxgdrm_connector_detect(struct drm_connector *connector, bool force)
+{
+	struct dxgdrm_display *dxg = connector_to_display(connector);
+	bool disconnected;
+
+	mutex_lock(&dxg->frame_lock);
+	disconnected = dxg->disconnected;
+	mutex_unlock(&dxg->frame_lock);
+
+	return disconnected ? connector_status_disconnected :
+			      connector_status_connected;
+}
+
 static const struct drm_connector_funcs dxgdrm_connector_funcs = {
+	.detect			= dxgdrm_connector_detect,
 	.fill_modes		= drm_helper_probe_single_connector_modes,
 	.destroy		= drm_connector_cleanup,
 	.reset			= drm_atomic_helper_connector_reset,
@@ -1336,6 +1354,28 @@ static int dxgdrm_select_display_ioctl(struct drm_device *dev, void *data,
 	return 0;
 }
 
+static int dxgdrm_set_connected_ioctl(struct drm_device *dev, void *data,
+				      struct drm_file *file)
+{
+	struct dxgdrm_file *priv = file->driver_priv;
+	struct dxgdrm_display *dxg = priv->display;
+	struct drm_dxgdrm_set_connected *args = data;
+	bool disconnected = !args->connected;
+	bool changed;
+
+	if (args->pad)
+		return -EINVAL;
+
+	mutex_lock(&dxg->frame_lock);
+	changed = dxg->disconnected != disconnected;
+	dxg->disconnected = disconnected;
+	mutex_unlock(&dxg->frame_lock);
+
+	if (changed)
+		drm_kms_helper_hotplug_event(dev);
+	return 0;
+}
+
 static const struct drm_ioctl_desc dxgdrm_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(DXGDRM_FENCE_FROM_EVENTFD, dxgdrm_fence_from_eventfd,
 			  DRM_RENDER_ALLOW),
@@ -1348,6 +1388,8 @@ static const struct drm_ioctl_desc dxgdrm_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(DXGDRM_SET_MODE, dxgdrm_set_mode_ioctl,
 			  DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(DXGDRM_SELECT_DISPLAY, dxgdrm_select_display_ioctl,
+			  DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(DXGDRM_SET_CONNECTED, dxgdrm_set_connected_ioctl,
 			  DRM_RENDER_ALLOW),
 };
 
