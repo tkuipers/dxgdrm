@@ -18,12 +18,12 @@
  * features below) and turning the eventfd behind a d3d12 fence into a real
  * sync_file (DXGDRM_FENCE_FROM_EVENTFD).
  *
- * The device is also a virtual display. It has one CRTC with a
- * primary and a cursor plane, so an unmodified compositor (mutter's or KWin's
- * native backend) can scan out to it like to any other KMS device. There is no
- * hardware behind the planes: each commit is handed to a userspace presenter
- * (DXGDRM_GET_FRAME), which reads the frame back and gets it to Windows. See
- * "Virtual display" below.
+ * The device is also a virtual display, or several (the displays parameter).
+ * Each has one CRTC with a primary and a cursor plane, so an unmodified
+ * compositor (mutter's or KWin's native backend) can scan out to it like to
+ * any other KMS device. There is no hardware behind the planes: each commit is
+ * handed to a userspace presenter (DXGDRM_GET_FRAME), which reads the frame
+ * back and gets it to Windows. See "Virtual display" below.
  *
  * That needs two kinds of GEM object, neither of which the kernel ever looks
  * into:
@@ -94,8 +94,11 @@
 #define DRIVER_NAME	"dxgdrm"
 #define DRIVER_DESC	"Render node and virtual display for the WSL d3d12 Mesa driver"
 
-struct dxgdrm_device {
-	struct drm_device base;
+#define DXGDRM_MAX_DISPLAYS	4
+
+/* One CRTC and what its presenter sees of it. */
+struct dxgdrm_display {
+	unsigned int index;
 
 	struct drm_plane primary;
 	struct drm_plane cursor;
@@ -122,7 +125,6 @@ struct dxgdrm_device {
 	/* The size and refresh rate of the one mode the connector offers, see
 	 * dxgdrm_set_mode_ioctl(). Under frame_lock. */
 	unsigned int mode_width, mode_height, mode_refresh_mhz;
-	struct drm_property *hotplug_mode_update;
 
 	/*
 	 * Flip throttling, see dxgdrm_crtc_atomic_flush(). @flip_seq is the
@@ -139,7 +141,17 @@ struct dxgdrm_device {
 	atomic_t presenters;
 };
 
+struct dxgdrm_device {
+	struct drm_device base;
+
+	struct drm_property *hotplug_mode_update;
+	unsigned int num_displays;
+	struct dxgdrm_display displays[DXGDRM_MAX_DISPLAYS];
+};
+
 #define to_dxgdrm(dev) container_of(dev, struct dxgdrm_device, base)
+#define crtc_to_display(c) container_of(c, struct dxgdrm_display, crtc)
+#define connector_to_display(c) container_of(c, struct dxgdrm_display, connector)
 
 /*
  * A dma_fence that signals when an eventfd does.
@@ -556,6 +568,10 @@ static int dxgdrm_prime_fd_to_handle(struct drm_device *dev,
  * mode's refresh rate, which the presenter sets to that of the client's monitor.
  */
 
+static unsigned int displays = 1;
+module_param(displays, uint, 0444);
+MODULE_PARM_DESC(displays, "Number of virtual displays, each with its own CRTC, connector and presenter");
+
 static unsigned int width = 1920;
 module_param(width, uint, 0444);
 MODULE_PARM_DESC(width, "Width of the virtual display's mode until a presenter sets one");
@@ -609,7 +625,7 @@ static int dxgdrm_plane_atomic_check(struct drm_plane *plane,
 						   is_cursor, true);
 }
 
-static void dxgdrm_add_damage(struct dxgdrm_device *dxg,
+static void dxgdrm_add_damage(struct dxgdrm_display *dxg,
 			      const struct drm_rect *clip)
 {
 	struct drm_dxgdrm_rect *rect;
@@ -632,7 +648,8 @@ static void dxgdrm_add_damage(struct dxgdrm_device *dxg,
 static void dxgdrm_primary_atomic_update(struct drm_plane *plane,
 					 struct drm_atomic_state *state)
 {
-	struct dxgdrm_device *dxg = to_dxgdrm(plane->dev);
+	struct dxgdrm_display *dxg =
+		container_of(plane, struct dxgdrm_display, primary);
 	struct drm_plane_state *old_state =
 		drm_atomic_get_old_plane_state(state, plane);
 	struct drm_plane_state *new_state =
@@ -692,7 +709,8 @@ static void dxgdrm_primary_atomic_update(struct drm_plane *plane,
 static void dxgdrm_cursor_atomic_update(struct drm_plane *plane,
 					struct drm_atomic_state *state)
 {
-	struct dxgdrm_device *dxg = to_dxgdrm(plane->dev);
+	struct dxgdrm_display *dxg =
+		container_of(plane, struct dxgdrm_display, cursor);
 	struct drm_plane_state *new_state =
 		drm_atomic_get_new_plane_state(state, plane);
 	struct drm_framebuffer *fb = new_state->fb;
@@ -777,7 +795,7 @@ static int dxgdrm_cursor_create_hotspot_properties(struct drm_plane *plane)
 
 /* Complete the flip that is being held back, if @seq allows it. With the
  * device's event_lock held. */
-static void dxgdrm_release_flip_locked(struct dxgdrm_device *dxg, u64 seq)
+static void dxgdrm_release_flip_locked(struct dxgdrm_display *dxg, u64 seq)
 {
 	if (!dxg->held_event || dxg->held_seq > seq)
 		return;
@@ -789,13 +807,13 @@ static void dxgdrm_release_flip_locked(struct dxgdrm_device *dxg, u64 seq)
 
 static void dxgdrm_flip_timeout(struct timer_list *timer)
 {
-	struct dxgdrm_device *dxg =
+	struct dxgdrm_display *dxg =
 		timer_container_of(dxg, timer, flip_timer);
 	unsigned long flags;
 
-	spin_lock_irqsave(&dxg->base.event_lock, flags);
+	spin_lock_irqsave(&dxg->crtc.dev->event_lock, flags);
 	dxgdrm_release_flip_locked(dxg, U64_MAX);
-	spin_unlock_irqrestore(&dxg->base.event_lock, flags);
+	spin_unlock_irqrestore(&dxg->crtc.dev->event_lock, flags);
 }
 
 /*
@@ -814,7 +832,7 @@ static void dxgdrm_flip_timeout(struct timer_list *timer)
 static void dxgdrm_crtc_atomic_flush(struct drm_crtc *crtc,
 				     struct drm_atomic_state *state)
 {
-	struct dxgdrm_device *dxg = to_dxgdrm(crtc->dev);
+	struct dxgdrm_display *dxg = crtc_to_display(crtc);
 	struct drm_pending_vblank_event *event = crtc->state->event;
 	u64 flip_seq = dxg->flip_seq;
 
@@ -874,7 +892,7 @@ static const struct drm_crtc_funcs dxgdrm_crtc_funcs = {
  */
 static int dxgdrm_connector_get_modes(struct drm_connector *connector)
 {
-	struct dxgdrm_device *dxg = to_dxgdrm(connector->dev);
+	struct dxgdrm_display *dxg = connector_to_display(connector);
 	struct drm_display_mode *mode;
 	unsigned int w, h, mhz;
 
@@ -923,25 +941,14 @@ static const struct drm_mode_config_funcs dxgdrm_mode_config_funcs = {
 	.atomic_commit	= drm_atomic_helper_commit,
 };
 
-static int dxgdrm_modeset_init(struct dxgdrm_device *dxg)
+static int dxgdrm_display_init(struct dxgdrm_device *dxgdev,
+			       struct dxgdrm_display *dxg)
 {
-	struct drm_device *dev = &dxg->base;
+	struct drm_device *dev = &dxgdev->base;
+	u32 crtc_mask = BIT(dxg->index);
 	int ret;
 
-	ret = drmm_mode_config_init(dev);
-	if (ret)
-		return ret;
-
-	dev->mode_config.funcs = &dxgdrm_mode_config_funcs;
-	dev->mode_config.min_width = 0;
-	dev->mode_config.min_height = 0;
-	dev->mode_config.max_width = DXGDRM_MAX_DIMENSION;
-	dev->mode_config.max_height = DXGDRM_MAX_DIMENSION;
-	dev->mode_config.cursor_width = DXGDRM_CURSOR_SIZE;
-	dev->mode_config.cursor_height = DXGDRM_CURSOR_SIZE;
-	dev->mode_config.preferred_depth = 24;
-
-	ret = drm_universal_plane_init(dev, &dxg->primary, 1,
+	ret = drm_universal_plane_init(dev, &dxg->primary, crtc_mask,
 				       &dxgdrm_plane_funcs,
 				       dxgdrm_primary_formats,
 				       ARRAY_SIZE(dxgdrm_primary_formats),
@@ -951,7 +958,7 @@ static int dxgdrm_modeset_init(struct dxgdrm_device *dxg)
 	drm_plane_helper_add(&dxg->primary, &dxgdrm_primary_helper_funcs);
 	drm_plane_enable_fb_damage_clips(&dxg->primary);
 
-	ret = drm_universal_plane_init(dev, &dxg->cursor, 1,
+	ret = drm_universal_plane_init(dev, &dxg->cursor, crtc_mask,
 				       &dxgdrm_plane_funcs,
 				       dxgdrm_cursor_formats,
 				       ARRAY_SIZE(dxgdrm_cursor_formats),
@@ -987,6 +994,30 @@ static int dxgdrm_modeset_init(struct dxgdrm_device *dxg)
 	if (ret)
 		return ret;
 
+	drm_object_attach_property(&dxg->connector.base,
+				   dxgdev->hotplug_mode_update, 1);
+	return 0;
+}
+
+static int dxgdrm_modeset_init(struct dxgdrm_device *dxg)
+{
+	struct drm_device *dev = &dxg->base;
+	unsigned int i;
+	int ret;
+
+	ret = drmm_mode_config_init(dev);
+	if (ret)
+		return ret;
+
+	dev->mode_config.funcs = &dxgdrm_mode_config_funcs;
+	dev->mode_config.min_width = 0;
+	dev->mode_config.min_height = 0;
+	dev->mode_config.max_width = DXGDRM_MAX_DIMENSION;
+	dev->mode_config.max_height = DXGDRM_MAX_DIMENSION;
+	dev->mode_config.cursor_width = DXGDRM_CURSOR_SIZE;
+	dev->mode_config.cursor_height = DXGDRM_CURSOR_SIZE;
+	dev->mode_config.preferred_depth = 24;
+
 	/* What qxl, virtio-gpu and vmwgfx have for the same purpose: it tells
 	 * the compositor to follow the preferred mode on a hotplug event
 	 * instead of restoring what it had (mutter checks for it). */
@@ -995,8 +1026,13 @@ static int dxgdrm_modeset_init(struct dxgdrm_device *dxg)
 					  "hotplug_mode_update", 0, 1);
 	if (!dxg->hotplug_mode_update)
 		return -ENOMEM;
-	drm_object_attach_property(&dxg->connector.base,
-				   dxg->hotplug_mode_update, 1);
+
+	/* In order: a display's index is its CRTC's. */
+	for (i = 0; i < dxg->num_displays; i++) {
+		ret = dxgdrm_display_init(dxg, &dxg->displays[i]);
+		if (ret)
+			return ret;
+	}
 
 	drm_mode_config_reset(dev);
 	return 0;
@@ -1007,14 +1043,19 @@ static int dxgdrm_modeset_init(struct dxgdrm_device *dxg)
  * DROP_MASTER (logind does those on a VT switch). */
 static void dxgdrm_set_owned(struct drm_device *dev, bool owned)
 {
-	struct dxgdrm_device *dxg = to_dxgdrm(dev);
+	struct dxgdrm_device *dxgdev = to_dxgdrm(dev);
+	unsigned int i;
 
-	mutex_lock(&dxg->frame_lock);
-	dxg->owned = owned;
-	dxg->seq++;
-	mutex_unlock(&dxg->frame_lock);
+	for (i = 0; i < dxgdev->num_displays; i++) {
+		struct dxgdrm_display *dxg = &dxgdev->displays[i];
 
-	wake_up_interruptible_all(&dxg->frame_wq);
+		mutex_lock(&dxg->frame_lock);
+		dxg->owned = owned;
+		dxg->seq++;
+		mutex_unlock(&dxg->frame_lock);
+
+		wake_up_interruptible_all(&dxg->frame_wq);
+	}
 }
 
 static void dxgdrm_master_set(struct drm_device *dev, struct drm_file *file,
@@ -1037,10 +1078,12 @@ static void dxgdrm_master_drop(struct drm_device *dev, struct drm_file *file)
  */
 
 /* What poll() needs to know about an open file: whether it is a presenter at
- * all, and the sequence number DXGDRM_GET_FRAME last left it with. */
+ * all, and the sequence number DXGDRM_GET_FRAME last left it with. @display is
+ * the one its presenter ioctls apply to, see DXGDRM_SELECT_DISPLAY. */
 struct dxgdrm_file {
 	unsigned long presenter;	/* bit 0 */
 	u64 seen_seq;
+	struct dxgdrm_display *display;
 };
 
 static int dxgdrm_open(struct drm_device *dev, struct drm_file *file)
@@ -1049,14 +1092,15 @@ static int dxgdrm_open(struct drm_device *dev, struct drm_file *file)
 
 	if (!priv)
 		return -ENOMEM;
+	priv->display = &to_dxgdrm(dev)->displays[0];
 	file->driver_priv = priv;
 	return 0;
 }
 
 static void dxgdrm_postclose(struct drm_device *dev, struct drm_file *file)
 {
-	struct dxgdrm_device *dxg = to_dxgdrm(dev);
 	struct dxgdrm_file *priv = file->driver_priv;
+	struct dxgdrm_display *dxg = priv->display;
 
 	/* Nobody is left to acknowledge the frame a flip is waiting for. */
 	if (test_bit(0, &priv->presenter) &&
@@ -1073,8 +1117,8 @@ static void dxgdrm_postclose(struct drm_device *dev, struct drm_file *file)
 static int dxgdrm_get_frame_ioctl(struct drm_device *dev, void *data,
 				  struct drm_file *file)
 {
-	struct dxgdrm_device *dxg = to_dxgdrm(dev);
 	struct dxgdrm_file *priv = file->driver_priv;
+	struct dxgdrm_display *dxg = priv->display;
 	struct drm_dxgdrm_get_frame *args = data;
 	struct drm_framebuffer *fb;
 	u64 seen = args->seq;
@@ -1182,7 +1226,8 @@ static int dxgdrm_get_frame_ioctl(struct drm_device *dev, void *data,
 static int dxgdrm_read_pixels_ioctl(struct drm_device *dev, void *data,
 				    struct drm_file *file)
 {
-	struct dxgdrm_device *dxg = to_dxgdrm(dev);
+	struct dxgdrm_file *priv = file->driver_priv;
+	struct dxgdrm_display *dxg = priv->display;
 	struct drm_dxgdrm_read_pixels *args = data;
 	struct drm_framebuffer *fb;
 	struct dxgdrm_gem *gem;
@@ -1231,7 +1276,8 @@ static int dxgdrm_read_pixels_ioctl(struct drm_device *dev, void *data,
 static int dxgdrm_ack_frame_ioctl(struct drm_device *dev, void *data,
 				  struct drm_file *file)
 {
-	struct dxgdrm_device *dxg = to_dxgdrm(dev);
+	struct dxgdrm_file *priv = file->driver_priv;
+	struct dxgdrm_display *dxg = priv->display;
 	struct drm_dxgdrm_ack_frame *args = data;
 
 	spin_lock_irq(&dev->event_lock);
@@ -1245,7 +1291,8 @@ static int dxgdrm_ack_frame_ioctl(struct drm_device *dev, void *data,
 static int dxgdrm_set_mode_ioctl(struct drm_device *dev, void *data,
 				 struct drm_file *file)
 {
-	struct dxgdrm_device *dxg = to_dxgdrm(dev);
+	struct dxgdrm_file *priv = file->driver_priv;
+	struct dxgdrm_display *dxg = priv->display;
 	struct drm_dxgdrm_set_mode *args = data;
 	unsigned int mhz = args->refresh_mhz;
 	bool changed;
@@ -1272,6 +1319,23 @@ static int dxgdrm_set_mode_ioctl(struct drm_device *dev, void *data,
 	return 0;
 }
 
+/* Before the file's first DXGDRM_GET_FRAME: a presenter stays with its display. */
+static int dxgdrm_select_display_ioctl(struct drm_device *dev, void *data,
+				       struct drm_file *file)
+{
+	struct dxgdrm_device *dxgdev = to_dxgdrm(dev);
+	struct dxgdrm_file *priv = file->driver_priv;
+	struct drm_dxgdrm_select_display *args = data;
+
+	if (args->pad || args->display >= dxgdev->num_displays)
+		return -EINVAL;
+	if (test_bit(0, &priv->presenter))
+		return -EBUSY;
+
+	priv->display = &dxgdev->displays[args->display];
+	return 0;
+}
+
 static const struct drm_ioctl_desc dxgdrm_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(DXGDRM_FENCE_FROM_EVENTFD, dxgdrm_fence_from_eventfd,
 			  DRM_RENDER_ALLOW),
@@ -1283,6 +1347,8 @@ static const struct drm_ioctl_desc dxgdrm_ioctls[] = {
 			  DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(DXGDRM_SET_MODE, dxgdrm_set_mode_ioctl,
 			  DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(DXGDRM_SELECT_DISPLAY, dxgdrm_select_display_ioctl,
+			  DRM_RENDER_ALLOW),
 };
 
 /* A presenter waits for the next commit in poll(), next to its sockets, and
@@ -1291,8 +1357,8 @@ static const struct drm_ioctl_desc dxgdrm_ioctls[] = {
 static __poll_t dxgdrm_poll(struct file *filp, struct poll_table_struct *wait)
 {
 	struct drm_file *file = filp->private_data;
-	struct dxgdrm_device *dxg = to_dxgdrm(file->minor->dev);
 	struct dxgdrm_file *priv = file->driver_priv;
+	struct dxgdrm_display *dxg = priv->display;
 	__poll_t mask = drm_poll(filp, wait);
 
 	if (test_bit(0, &priv->presenter)) {
@@ -1352,6 +1418,7 @@ static const struct drm_driver dxgdrm_driver = {
 static int dxgdrm_probe(struct platform_device *pdev)
 {
 	struct dxgdrm_device *dxg;
+	unsigned int i;
 	int ret;
 
 	dxg = devm_drm_dev_alloc(&pdev->dev, &dxgdrm_driver,
@@ -1361,12 +1428,18 @@ static int dxgdrm_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, dxg);
 
-	mutex_init(&dxg->frame_lock);
-	init_waitqueue_head(&dxg->frame_wq);
-	timer_setup(&dxg->flip_timer, dxgdrm_flip_timeout, 0);
-	dxg->mode_width = clamp(width, 64U, (unsigned int)DXGDRM_MAX_DIMENSION);
-	dxg->mode_height = clamp(height, 64U, (unsigned int)DXGDRM_MAX_DIMENSION);
-	dxg->mode_refresh_mhz = dxgdrm_default_refresh_mhz();
+	dxg->num_displays = clamp(displays, 1U, (unsigned int)DXGDRM_MAX_DISPLAYS);
+	for (i = 0; i < dxg->num_displays; i++) {
+		struct dxgdrm_display *display = &dxg->displays[i];
+
+		display->index = i;
+		mutex_init(&display->frame_lock);
+		init_waitqueue_head(&display->frame_wq);
+		timer_setup(&display->flip_timer, dxgdrm_flip_timeout, 0);
+		display->mode_width = clamp(width, 64U, (unsigned int)DXGDRM_MAX_DIMENSION);
+		display->mode_height = clamp(height, 64U, (unsigned int)DXGDRM_MAX_DIMENSION);
+		display->mode_refresh_mhz = dxgdrm_default_refresh_mhz();
+	}
 
 	ret = dxgdrm_modeset_init(dxg);
 	if (ret)
@@ -1376,23 +1449,28 @@ static int dxgdrm_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	drm_info(&dxg->base, "render node and %ux%u virtual display registered for /dev/dxg\n",
-		 width, height);
+	drm_info(&dxg->base, "render node and %u %ux%u virtual display(s) registered for /dev/dxg\n",
+		 dxg->num_displays, width, height);
 	return 0;
 }
 
 static void dxgdrm_remove(struct platform_device *pdev)
 {
 	struct dxgdrm_device *dxg = platform_get_drvdata(pdev);
+	unsigned int i;
 
 	drm_dev_unregister(&dxg->base);
 	/* Disables the planes, which drops the framebuffers we hold. */
 	drm_atomic_helper_shutdown(&dxg->base);
 
-	spin_lock_irq(&dxg->base.event_lock);
-	dxgdrm_release_flip_locked(dxg, U64_MAX);
-	spin_unlock_irq(&dxg->base.event_lock);
-	timer_delete_sync(&dxg->flip_timer);
+	for (i = 0; i < dxg->num_displays; i++) {
+		struct dxgdrm_display *display = &dxg->displays[i];
+
+		spin_lock_irq(&dxg->base.event_lock);
+		dxgdrm_release_flip_locked(display, U64_MAX);
+		spin_unlock_irq(&dxg->base.event_lock);
+		timer_delete_sync(&display->flip_timer);
+	}
 }
 
 static struct platform_driver dxgdrm_platform_driver = {

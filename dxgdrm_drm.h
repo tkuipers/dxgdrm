@@ -46,10 +46,11 @@ struct drm_dxgdrm_fence_from_eventfd {
 /*
  * The presenter side of the virtual display.
  *
- * dxgdrm has one CRTC with a primary and a cursor plane and nothing behind
- * them. Whatever the compositor commits is handed to a userspace presenter
- * through the ioctls below (GET_FRAME, READ_PIXELS, ACK_FRAME, SET_MODE),
- * which is what reads the frame back and gets it to Windows.
+ * Each display of dxgdrm has one CRTC with a primary and a cursor plane and
+ * nothing behind them. Whatever the compositor commits is handed to a userspace
+ * presenter through the ioctls below (GET_FRAME, READ_PIXELS, ACK_FRAME,
+ * SET_MODE), which is what reads the frame back and gets it to Windows. They apply to the
+ * first display unless the file has chosen another with SELECT_DISPLAY.
  *
  * A primary framebuffer is one of two things. A d3d12 buffer is a D3D12 shared
  * handle that the compositor imported with DRM_IOCTL_PRIME_FD_TO_HANDLE (the
@@ -203,11 +204,26 @@ struct drm_dxgdrm_set_mode {
 	__u32 refresh_mhz;
 };
 
+/**
+ * struct drm_dxgdrm_select_display - choose the display of this open file
+ *
+ * The presenter ioctls of this file then apply to that display, one presenter
+ * per display. Only before the file's first DXGDRM_GET_FRAME (-EBUSY after it).
+ * -EINVAL for a display the module was not loaded with.
+ */
+struct drm_dxgdrm_select_display {
+	/** @display: in, from 0. */
+	__u32 display;
+	/** @pad: must be 0. */
+	__u32 pad;
+};
+
 #define DRM_DXGDRM_FENCE_FROM_EVENTFD	0x00
 #define DRM_DXGDRM_GET_FRAME		0x01
 #define DRM_DXGDRM_READ_PIXELS		0x02
 #define DRM_DXGDRM_ACK_FRAME		0x03
 #define DRM_DXGDRM_SET_MODE		0x04
+#define DRM_DXGDRM_SELECT_DISPLAY	0x05
 
 #define DRM_IOCTL_DXGDRM_FENCE_FROM_EVENTFD				\
 	DRM_IOWR(DRM_COMMAND_BASE + DRM_DXGDRM_FENCE_FROM_EVENTFD,	\
@@ -224,6 +240,9 @@ struct drm_dxgdrm_set_mode {
 #define DRM_IOCTL_DXGDRM_SET_MODE					\
 	DRM_IOW(DRM_COMMAND_BASE + DRM_DXGDRM_SET_MODE,			\
 		struct drm_dxgdrm_set_mode)
+#define DRM_IOCTL_DXGDRM_SELECT_DISPLAY					\
+	DRM_IOW(DRM_COMMAND_BASE + DRM_DXGDRM_SELECT_DISPLAY,		\
+		struct drm_dxgdrm_select_display)
 
 #if defined(__cplusplus)
 }
