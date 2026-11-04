@@ -35,6 +35,7 @@ handful of ioctls on the render node, described in
 | `DXGDRM_ACK_FRAME` | Says the presenter has taken a frame. The compositor's page flip completes only then, which holds it to the pace frames can be read back at. |
 | `DXGDRM_READ_PIXELS` | Copies a dumb buffer's pixels out. |
 | `DXGDRM_SET_MODE` | Sets the size of the one mode the connector offers; a hotplug event tells the compositor. |
+| `DXGDRM_SHIFT_VBLANK` | Moves the virtual vblank in time, to line the frames up with the client's monitor. |
 | `DXGDRM_FENCE_FROM_EVENTFD` | The fence conversion above. |
 
 A framebuffer is one of two things:

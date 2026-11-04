@@ -31,12 +31,13 @@ and of weaselwayd are in weaselway's `docs/adr`, and are referred to as
 | [0017](0017-drm-core-as-modules.md) | DRM core is built as modules for kernels without it | Accepted |
 | [0018](0018-refresh-rate-from-the-presenter.md) | The presenter sets the mode's refresh rate | Accepted |
 | [0019](0019-flips-complete-on-a-virtual-vblank.md) | Flips complete on a virtual vblank | Accepted |
+| [0020](0020-presenter-shifts-the-vblank.md) | The presenter shifts the vblank | Accepted |
 
 ## Known risks
 
 Found while writing these records, details in the linked files:
 
-- Any local process can read the screen, set the mode and acknowledge frames:
+- Any local process can read the screen, set the mode, acknowledge frames and shift the vblank:
   the presenter's ioctls are allowed on the render node, and the udev rule
   makes it mode 0666 ([0014](0014-presenter-ioctls-on-the-render-node.md),
   [0016](0016-udev-mode-only.md)).

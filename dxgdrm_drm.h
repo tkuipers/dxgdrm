@@ -48,7 +48,8 @@ struct drm_dxgdrm_fence_from_eventfd {
  *
  * dxgdrm has one CRTC with a primary and a cursor plane and nothing behind
  * them. Whatever the compositor commits is handed to a userspace presenter
- * through the ioctls below (GET_FRAME, READ_PIXELS, ACK_FRAME, SET_MODE),
+ * through the ioctls below (GET_FRAME, READ_PIXELS, ACK_FRAME, SET_MODE,
+ * SHIFT_VBLANK),
  * which is what reads the frame back and gets it to Windows.
  *
  * A primary framebuffer is one of two things. A d3d12 buffer is a D3D12 shared
@@ -203,11 +204,25 @@ struct drm_dxgdrm_set_mode {
 	__u32 refresh_mhz;
 };
 
+/**
+ * struct drm_dxgdrm_shift_vblank - move the virtual vblank in time
+ *
+ * Moves the vblank by @shift_ns, later if positive. A presenter uses it to
+ * line the compositor's frames up with the client's monitor. The vblank moves
+ * by at most a quarter of a frame per vblank until the whole shift is applied;
+ * a later call replaces what is not applied yet.
+ */
+struct drm_dxgdrm_shift_vblank {
+	/** @shift_ns: in, -1 s to 1 s. */
+	__s64 shift_ns;
+};
+
 #define DRM_DXGDRM_FENCE_FROM_EVENTFD	0x00
 #define DRM_DXGDRM_GET_FRAME		0x01
 #define DRM_DXGDRM_READ_PIXELS		0x02
 #define DRM_DXGDRM_ACK_FRAME		0x03
 #define DRM_DXGDRM_SET_MODE		0x04
+#define DRM_DXGDRM_SHIFT_VBLANK		0x05
 
 #define DRM_IOCTL_DXGDRM_FENCE_FROM_EVENTFD				\
 	DRM_IOWR(DRM_COMMAND_BASE + DRM_DXGDRM_FENCE_FROM_EVENTFD,	\
@@ -224,6 +239,9 @@ struct drm_dxgdrm_set_mode {
 #define DRM_IOCTL_DXGDRM_SET_MODE					\
 	DRM_IOW(DRM_COMMAND_BASE + DRM_DXGDRM_SET_MODE,			\
 		struct drm_dxgdrm_set_mode)
+#define DRM_IOCTL_DXGDRM_SHIFT_VBLANK					\
+	DRM_IOW(DRM_COMMAND_BASE + DRM_DXGDRM_SHIFT_VBLANK,		\
+		struct drm_dxgdrm_shift_vblank)
 
 #if defined(__cplusplus)
 }
