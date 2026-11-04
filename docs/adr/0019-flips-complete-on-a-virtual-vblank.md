@@ -40,3 +40,5 @@ a warning.
   desktop runs at 35-45 fps.
 - `DRM_IOCTL_WAIT_VBLANK` works, and mutter's deadline timer stays on.
 - Cursor moves are limited to the refresh rate, as on real hardware.
+- It needs DRM's vblank timer helpers (`drm_vblank_helper.h`), which
+  `6.18.33.2` does not have, so that kernel is no longer supported (0006).

@@ -23,7 +23,7 @@ KERNEL_REPO=https://github.com/microsoft/WSL2-Linux-Kernel.git
 # target kernel -- uname -r says nothing useful, so point KERNEL_CONFIG at one
 # of the captured configs in ./conf instead:
 #
-#   KERNEL_CONFIG=conf/kernel-6.18.33.2-microsoft-standard-WSL2.conf \
+#   KERNEL_CONFIG=conf/kernel-6.18.54.1-microsoft-standard-WSL2.conf \
 #     ./build-kernel-headers.sh
 #
 # Those are named for the release they were captured from, which is where the

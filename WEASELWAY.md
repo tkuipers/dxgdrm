@@ -17,8 +17,8 @@ nix build                    # dxgdrm-all: one module per kernel in conf/
 
 - **`packages.wsl-kernel-dev`** is the Nix equivalent of
   [build-kernel-headers.sh](build-kernel-headers.sh). It fetches
-  `microsoft/WSL2-Linux-Kernel` at tag `linux-msft-wsl-6.18.33.2`, uses
-  `conf/kernel-6.18.33.2-microsoft-standard-WSL2.conf` as `.config`, runs
+  `microsoft/WSL2-Linux-Kernel` at tag `linux-msft-wsl-6.18.54.1`, uses
+  `conf/kernel-6.18.54.1-microsoft-standard-WSL2.conf` as `.config`, runs
   `make LOCALVERSION= vmlinux modules_prepare`, copies
   `vmlinux.symvers` to `Module.symvers`, and checks that `kernel.release`
   matches.
@@ -75,7 +75,7 @@ helpers built as modules is read from its config.
 `CONFIG_MODVERSIONS=y`, and the symbol CRCs depend on the compiler, so a module
 built with nixpkgs' gcc 15 is rejected ("disagrees about version of symbol").
 kgcc avoids that, and the config check proves that the toolchain matches. The
-built module's vermagic is `6.18.33.2-microsoft-standard-WSL2 SMP preempt
+built module's vermagic is `6.18.54.1-microsoft-standard-WSL2 SMP preempt
 mod_unload modversions`, and it loads on that WSL kernel. See [BUILD-NOTES.md](BUILD-NOTES.md) for background.
 
 ## Notes

@@ -17,7 +17,6 @@
       # in ./conf/kernel-<release>.conf and the hash of the matching
       # microsoft/WSL2-Linux-Kernel tag, see WEASELWAY.md.
       kernels = {
-        "6.18.33.2-microsoft-standard-WSL2" = "sha256-5zGJZdKvTijB5guP05DRmeTh1vXgbX76y0qIUwbumX0=";
         "6.18.40.1-microsoft-standard-WSL2" = "sha256-YMqq3RzXNPibwzckYboDChp2IrUQYauX7Zc0nE+CgMY=";
         "6.18.54.1-microsoft-standard-WSL2" = "sha256-iN6eWKJV20yGn2TPtLFxA4mI52G0dcO2zEOMJV1lfcs=";
       };
