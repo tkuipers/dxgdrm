@@ -1,6 +1,6 @@
 # 0011. A virtual KMS display whose commits go to a userspace presenter
 
-Status: Accepted
+Status: Accepted, the vblank superseded by 0019
 
 ## Context
 

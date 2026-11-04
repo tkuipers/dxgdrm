@@ -85,6 +85,7 @@
 #include <drm/drm_modeset_helper_vtables.h>
 #include <drm/drm_prime.h>
 #include <drm/drm_vblank.h>
+#include <drm/drm_vblank_helper.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_simple_kms_helper.h>
 #include <drm/drm_vma_manager.h>
@@ -548,12 +549,13 @@ static int dxgdrm_prime_fd_to_handle(struct drm_device *dev,
  * Virtual display.
  *
  * Nothing is scanned out. A commit records which framebuffer each plane shows
- * and what was damaged, bumps a sequence number and wakes the presenter. There
- * is no vblank either. A flip that brings a new frame completes when the
- * presenter has taken that frame (DXGDRM_ACK_FRAME), which is what holds the
- * compositor to the rate the frames can be read back at; every other commit
- * completes right away, and the compositor's own frame clock limits it to the
- * mode's refresh rate, which the presenter sets to that of the client's monitor.
+ * and what was damaged, bumps a sequence number and wakes the presenter. The
+ * vblank is an hrtimer at the mode's refresh rate, which the presenter sets to
+ * that of the client's monitor. Every flip completes on a vblank, so the
+ * compositor sees presentation times on a regular grid; a flip that brings a
+ * new frame also waits for the presenter to take that frame
+ * (DXGDRM_ACK_FRAME), which holds the compositor to the rate the frames can be
+ * read back at.
  */
 
 static unsigned int width = 1920;
@@ -775,6 +777,17 @@ static int dxgdrm_cursor_create_hotspot_properties(struct drm_plane *plane)
 	return 0;
 }
 
+/* Complete a flip on the next vblank, or now if the CRTC is off. With the
+ * device's event_lock held. */
+static void dxgdrm_complete_flip_locked(struct drm_crtc *crtc,
+					struct drm_pending_vblank_event *event)
+{
+	if (drm_crtc_vblank_get(crtc) == 0)
+		drm_crtc_arm_vblank_event(crtc, event);
+	else
+		drm_crtc_send_vblank_event(crtc, event);
+}
+
 /* Complete the flip that is being held back, if @seq allows it. With the
  * device's event_lock held. */
 static void dxgdrm_release_flip_locked(struct dxgdrm_device *dxg, u64 seq)
@@ -782,7 +795,7 @@ static void dxgdrm_release_flip_locked(struct dxgdrm_device *dxg, u64 seq)
 	if (!dxg->held_event || dxg->held_seq > seq)
 		return;
 
-	drm_crtc_send_vblank_event(&dxg->crtc, dxg->held_event);
+	dxgdrm_complete_flip_locked(&dxg->crtc, dxg->held_event);
 	dxg->held_event = NULL;
 	timer_delete(&dxg->flip_timer);
 }
@@ -809,7 +822,7 @@ static void dxgdrm_flip_timeout(struct timer_list *timer)
  * one in between only after that.
  *
  * Without a presenter, or if it does not answer within flip_timeout_ms, the
- * event goes out anyway.
+ * flip completes anyway. Either way it completes on the vblank after that.
  */
 static void dxgdrm_crtc_atomic_flush(struct drm_crtc *crtc,
 				     struct drm_atomic_state *state)
@@ -834,28 +847,19 @@ static void dxgdrm_crtc_atomic_flush(struct drm_crtc *crtc,
 		mod_timer(&dxg->flip_timer,
 			  jiffies + msecs_to_jiffies(flip_timeout_ms));
 	} else {
-		drm_crtc_send_vblank_event(crtc, event);
+		dxgdrm_complete_flip_locked(crtc, event);
 	}
 	spin_unlock_irq(&crtc->dev->event_lock);
 }
 
-static void dxgdrm_crtc_atomic_enable(struct drm_crtc *crtc,
-				      struct drm_atomic_state *state)
-{
-}
-
-static void dxgdrm_crtc_atomic_disable(struct drm_crtc *crtc,
-				       struct drm_atomic_state *state)
-{
-}
-
 static const struct drm_crtc_helper_funcs dxgdrm_crtc_helper_funcs = {
 	.atomic_flush	= dxgdrm_crtc_atomic_flush,
-	.atomic_enable	= dxgdrm_crtc_atomic_enable,
-	.atomic_disable	= dxgdrm_crtc_atomic_disable,
+	.atomic_enable	= drm_crtc_vblank_atomic_enable,
+	.atomic_disable	= drm_crtc_vblank_atomic_disable,
 };
 
 static const struct drm_crtc_funcs dxgdrm_crtc_funcs = {
+	DRM_CRTC_VBLANK_TIMER_FUNCS,
 	.set_config		= drm_atomic_helper_set_config,
 	.page_flip		= drm_atomic_helper_page_flip,
 	.destroy		= drm_crtc_cleanup,
@@ -1367,6 +1371,10 @@ static int dxgdrm_probe(struct platform_device *pdev)
 	dxg->mode_width = clamp(width, 64U, (unsigned int)DXGDRM_MAX_DIMENSION);
 	dxg->mode_height = clamp(height, 64U, (unsigned int)DXGDRM_MAX_DIMENSION);
 	dxg->mode_refresh_mhz = dxgdrm_default_refresh_mhz();
+
+	ret = drm_vblank_init(&dxg->base, 1);
+	if (ret)
+		return ret;
 
 	ret = dxgdrm_modeset_init(dxg);
 	if (ret)

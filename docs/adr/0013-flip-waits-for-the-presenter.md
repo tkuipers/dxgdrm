@@ -1,6 +1,6 @@
 # 0013. A page flip completes when the presenter has taken the frame
 
-Status: Accepted
+Status: Superseded by 0019
 
 ## Context
 
