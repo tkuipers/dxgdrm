@@ -85,6 +85,7 @@
 #include <drm/drm_modeset_helper_vtables.h>
 #include <drm/drm_prime.h>
 #include <drm/drm_vblank.h>
+#include <drm/drm_vblank_helper.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_simple_kms_helper.h>
 #include <drm/drm_vma_manager.h>
@@ -142,6 +143,10 @@ struct dxgdrm_display {
 	struct timer_list flip_timer;
 	/* Open files that have called DXGDRM_GET_FRAME. */
 	atomic_t presenters;
+
+	/* See dxgdrm_crtc_handle_vblank_timeout(). */
+	atomic64_t vblank_shift_ns;
+	ktime_t vblank_anchor;
 };
 
 struct dxgdrm_device {
@@ -563,12 +568,13 @@ static int dxgdrm_prime_fd_to_handle(struct drm_device *dev,
  * Virtual display.
  *
  * Nothing is scanned out. A commit records which framebuffer each plane shows
- * and what was damaged, bumps a sequence number and wakes the presenter. There
- * is no vblank either. A flip that brings a new frame completes when the
- * presenter has taken that frame (DXGDRM_ACK_FRAME), which is what holds the
- * compositor to the rate the frames can be read back at; every other commit
- * completes right away, and the compositor's own frame clock limits it to the
- * mode's refresh rate, which the presenter sets to that of the client's monitor.
+ * and what was damaged, bumps a sequence number and wakes the presenter. The
+ * vblank is an hrtimer at the mode's refresh rate, which the presenter sets to
+ * that of the client's monitor, and moves in time with DXGDRM_SHIFT_VBLANK.
+ * Every flip completes on a vblank, so the compositor sees presentation times
+ * on a regular grid; a flip that brings a new frame also waits for the
+ * presenter to take that frame (DXGDRM_ACK_FRAME), which holds the compositor
+ * to the rate the frames can be read back at.
  */
 
 static unsigned int displays = 1;
@@ -796,6 +802,17 @@ static int dxgdrm_cursor_create_hotspot_properties(struct drm_plane *plane)
 	return 0;
 }
 
+/* Complete a flip on the next vblank, or now if the CRTC is off. With the
+ * device's event_lock held. */
+static void dxgdrm_complete_flip_locked(struct drm_crtc *crtc,
+					struct drm_pending_vblank_event *event)
+{
+	if (drm_crtc_vblank_get(crtc) == 0)
+		drm_crtc_arm_vblank_event(crtc, event);
+	else
+		drm_crtc_send_vblank_event(crtc, event);
+}
+
 /* Complete the flip that is being held back, if @seq allows it. With the
  * device's event_lock held. */
 static void dxgdrm_release_flip_locked(struct dxgdrm_display *dxg, u64 seq)
@@ -803,7 +820,7 @@ static void dxgdrm_release_flip_locked(struct dxgdrm_display *dxg, u64 seq)
 	if (!dxg->held_event || dxg->held_seq > seq)
 		return;
 
-	drm_crtc_send_vblank_event(&dxg->crtc, dxg->held_event);
+	dxgdrm_complete_flip_locked(&dxg->crtc, dxg->held_event);
 	dxg->held_event = NULL;
 	timer_delete(&dxg->flip_timer);
 }
@@ -830,7 +847,7 @@ static void dxgdrm_flip_timeout(struct timer_list *timer)
  * one in between only after that.
  *
  * Without a presenter, or if it does not answer within flip_timeout_ms, the
- * event goes out anyway.
+ * flip completes anyway. Either way it completes on the vblank after that.
  */
 static void dxgdrm_crtc_atomic_flush(struct drm_crtc *crtc,
 				     struct drm_atomic_state *state)
@@ -855,28 +872,83 @@ static void dxgdrm_crtc_atomic_flush(struct drm_crtc *crtc,
 		mod_timer(&dxg->flip_timer,
 			  jiffies + msecs_to_jiffies(flip_timeout_ms));
 	} else {
-		drm_crtc_send_vblank_event(crtc, event);
+		dxgdrm_complete_flip_locked(crtc, event);
 	}
 	spin_unlock_irq(&crtc->dev->event_lock);
 }
 
-static void dxgdrm_crtc_atomic_enable(struct drm_crtc *crtc,
-				      struct drm_atomic_state *state)
+/*
+ * The presenter moves the vblank with DXGDRM_SHIFT_VBLANK, to line the frames
+ * up with the client's monitor. The vblank timer has already been forwarded to
+ * the next vblank when this runs, so moving that expiry moves the next vblank,
+ * and its timestamp (expiry minus interval) moves with it. At most a quarter
+ * of a frame per vblank, so the vblank core still counts one vblank per tick.
+ *
+ * @vblank_anchor remembers the next vblank, so that the vblank keeps its phase
+ * when it is turned off and on again, see dxgdrm_crtc_enable_vblank().
+ */
+static bool dxgdrm_crtc_handle_vblank_timeout(struct drm_crtc *crtc)
 {
+	struct dxgdrm_display *dxg = crtc_to_display(crtc);
+	struct drm_vblank_crtc *vblank = drm_crtc_vblank_crtc(crtc);
+	struct hrtimer *timer = &vblank->vblank_timer.timer;
+	s64 max = vblank->framedur_ns / 4;
+	s64 pending = atomic64_read(&dxg->vblank_shift_ns);
+	s64 shift;
+
+	if (!drm_crtc_handle_vblank(crtc))
+		return false;
+
+	do {
+		shift = clamp(pending, -max, max);
+	} while (!atomic64_try_cmpxchg(&dxg->vblank_shift_ns, &pending,
+				       pending - shift));
+
+	/* Not hrtimer_add_expires_ns(): it takes the shift as u64. */
+	if (shift)
+		hrtimer_set_expires(timer, ktime_add(hrtimer_get_expires(timer),
+						     ns_to_ktime(shift)));
+	WRITE_ONCE(dxg->vblank_anchor, hrtimer_get_expires(timer));
+	return true;
 }
 
-static void dxgdrm_crtc_atomic_disable(struct drm_crtc *crtc,
-				       struct drm_atomic_state *state)
+/* The helper starts the timer a frame from now. Start it on the grid of the
+ * vblanks before instead. */
+static int dxgdrm_crtc_enable_vblank(struct drm_crtc *crtc)
 {
+	struct dxgdrm_display *dxg = crtc_to_display(crtc);
+	struct drm_vblank_crtc *vblank = drm_crtc_vblank_crtc(crtc);
+	ktime_t anchor = READ_ONCE(dxg->vblank_anchor);
+	s64 interval;
+	ktime_t now;
+	int ret;
+
+	ret = drm_crtc_vblank_helper_enable_vblank_timer(crtc);
+	interval = ktime_to_ns(vblank->vblank_timer.interval);
+	if (ret || !anchor || interval <= 0)
+		return ret;
+
+	now = ktime_get();
+	if (!ktime_after(anchor, now))
+		anchor = ktime_add_ns(anchor,
+				      (div64_u64(ktime_sub(now, anchor), interval) + 1) *
+				      interval);
+	hrtimer_start(&vblank->vblank_timer.timer, anchor, HRTIMER_MODE_ABS);
+	return 0;
 }
 
 static const struct drm_crtc_helper_funcs dxgdrm_crtc_helper_funcs = {
 	.atomic_flush	= dxgdrm_crtc_atomic_flush,
-	.atomic_enable	= dxgdrm_crtc_atomic_enable,
-	.atomic_disable	= dxgdrm_crtc_atomic_disable,
+	.atomic_enable	= drm_crtc_vblank_atomic_enable,
+	.atomic_disable	= drm_crtc_vblank_atomic_disable,
+	.handle_vblank_timeout = dxgdrm_crtc_handle_vblank_timeout,
 };
 
 static const struct drm_crtc_funcs dxgdrm_crtc_funcs = {
+	.enable_vblank		= dxgdrm_crtc_enable_vblank,
+	.disable_vblank		= drm_crtc_vblank_helper_disable_vblank_timer,
+	.get_vblank_timestamp	=
+		drm_crtc_vblank_helper_get_vblank_timestamp_from_timer,
 	.set_config		= drm_atomic_helper_set_config,
 	.page_flip		= drm_atomic_helper_page_flip,
 	.destroy		= drm_crtc_cleanup,
@@ -1337,6 +1409,20 @@ static int dxgdrm_set_mode_ioctl(struct drm_device *dev, void *data,
 	return 0;
 }
 
+static int dxgdrm_shift_vblank_ioctl(struct drm_device *dev, void *data,
+				     struct drm_file *file)
+{
+	struct dxgdrm_file *priv = file->driver_priv;
+	struct dxgdrm_display *dxg = priv->display;
+	struct drm_dxgdrm_shift_vblank *args = data;
+
+	if (args->shift_ns < -NSEC_PER_SEC || args->shift_ns > NSEC_PER_SEC)
+		return -EINVAL;
+
+	atomic64_set(&dxg->vblank_shift_ns, args->shift_ns);
+	return 0;
+}
+
 /* Before the file's first DXGDRM_GET_FRAME: a presenter stays with its display. */
 static int dxgdrm_select_display_ioctl(struct drm_device *dev, void *data,
 				       struct drm_file *file)
@@ -1386,6 +1472,8 @@ static const struct drm_ioctl_desc dxgdrm_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(DXGDRM_ACK_FRAME, dxgdrm_ack_frame_ioctl,
 			  DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(DXGDRM_SET_MODE, dxgdrm_set_mode_ioctl,
+			  DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(DXGDRM_SHIFT_VBLANK, dxgdrm_shift_vblank_ioctl,
 			  DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(DXGDRM_SELECT_DISPLAY, dxgdrm_select_display_ioctl,
 			  DRM_RENDER_ALLOW),
@@ -1482,6 +1570,10 @@ static int dxgdrm_probe(struct platform_device *pdev)
 		display->mode_height = clamp(height, 64U, (unsigned int)DXGDRM_MAX_DIMENSION);
 		display->mode_refresh_mhz = dxgdrm_default_refresh_mhz();
 	}
+
+	ret = drm_vblank_init(&dxg->base, dxg->num_displays);
+	if (ret)
+		return ret;
 
 	ret = dxgdrm_modeset_init(dxg);
 	if (ret)

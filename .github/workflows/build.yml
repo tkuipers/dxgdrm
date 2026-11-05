@@ -8,10 +8,12 @@
 name: build
 
 # Pushes to main, and pull requests -- not every push too, which ran a PR's
-# commits twice. Other branches can be built with workflow_dispatch.
+# commits twice. Other branches can be built with workflow_dispatch. A v* tag
+# also publishes the modules as a release.
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -104,3 +106,36 @@ jobs:
             build/wsl-kernel/drivers/gpu/drm/drm.ko
             build/wsl-kernel/drivers/gpu/drm/drm_kms_helper.ko
           if-no-files-found: error
+
+  # One dxgdrm-<kernel release>.tar.gz per kernel, for installs without Nix.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Pack the tarballs
+        run: |
+          for dir in artifacts/dxgdrm-*/; do
+            release="$(basename "${dir}")"
+            ./release-tarball.sh "${dir}" "${release#dxgdrm-}" dist
+          done
+
+      # A rerun replaces the assets of the existing release.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "${TAG}" > /dev/null 2>&1; then
+            gh release upload "${TAG}" dist/*.tar.gz --clobber
+          else
+            gh release create "${TAG}" --verify-tag --generate-notes dist/*.tar.gz
+          fi

@@ -35,6 +35,7 @@ handful of ioctls on the render node, described in
 | `DXGDRM_ACK_FRAME` | Says the presenter has taken a frame. The compositor's page flip completes only then, which holds it to the pace frames can be read back at. |
 | `DXGDRM_READ_PIXELS` | Copies a dumb buffer's pixels out. |
 | `DXGDRM_SET_MODE` | Sets the size of the one mode the connector offers; a hotplug event tells the compositor. |
+| `DXGDRM_SHIFT_VBLANK` | Moves the virtual vblank in time, to line the frames up with the client's monitor. |
 | `DXGDRM_FENCE_FROM_EVENTFD` | The fence conversion above. |
 
 A framebuffer is one of two things:
@@ -61,6 +62,22 @@ try to treat specially.
 
 [99-dxgdrm.rules](99-dxgdrm.rules) opens up permissions on both nodes as soon
 as the module loads.
+
+## Releases
+
+Each `v*` tag gets a GitHub release with one `dxgdrm-<kernel release>.tar.gz`
+per supported WSL kernel, built by CI. It contains
+`lib/modules/<kernel release>/extra/` with `dxgdrm.ko`, the DRM core modules
+that kernel lacks and a `modules.dep`, plus the udev rules under
+`lib/udev/rules.d/`. Unpack it into a directory and load the module from
+there; `modprobe` loads the DRM core modules first:
+
+```sh
+sudo mkdir -p /opt/dxgdrm
+curl -fL https://github.com/weaselway/dxgdrm/releases/download/v1.2.0/dxgdrm-$(uname -r).tar.gz |
+    sudo tar -C /opt/dxgdrm -xz
+sudo modprobe -d /opt/dxgdrm dxgdrm
+```
 
 ## Building and loading
 

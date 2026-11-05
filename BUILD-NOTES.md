@@ -29,7 +29,7 @@ for that kernel's release, and `KERNEL_CONFIG` makes
 from the machine it is running on.
 
 ```
-KERNEL_CONFIG=conf/kernel-6.18.33.2-microsoft-standard-WSL2.conf \
+KERNEL_CONFIG=conf/kernel-6.18.54.1-microsoft-standard-WSL2.conf \
   ./build-kernel-headers.sh && make all
 ```
 
